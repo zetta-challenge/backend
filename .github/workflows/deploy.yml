@@ -1,0 +1,113 @@
+name: CI/CD Backend
+
+#TODO: Add configurational service env vars (API Keys)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  PROJECT_ID: devops-realm
+  PROJECT_NAME: zetta-challenge-prod
+  REGION: europe-west4
+  SERVICE_NAME: be-api-service-prod
+
+# TODO: Separate the steps into organized jobs + artifact retention
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set derived environment variables
+        run: |
+          echo "DOCKER_REGISTRY_NAME=${{ env.PROJECT_NAME }}-registry" >> $GITHUB_ENV
+          echo "VPC_NETWORK=${{ env.PROJECT_NAME }}-vpc-euwest4" >> $GITHUB_ENV
+          echo "SUBNET_NAME=${{ env.PROJECT_NAME }}-subnet-euwest4" >> $GITHUB_ENV
+          echo "IMAGE_NAME=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.PROJECT_NAME }}-registry/${{ env.SERVICE_NAME }}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for GCR
+        run: |
+          echo "🔐 Setting up Docker authentication to GCP..."
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Build Docker Image
+        run: |
+          echo "🚀 Building Backend API Image"
+          echo "   Project: ${{ env.PROJECT_ID }}"
+          echo "   Region: ${{ env.REGION }}"
+          echo "   Registry: ${{ env.DOCKER_REGISTRY_NAME }}"
+          echo "   Service: ${{ env.SERVICE_NAME }}"
+          echo "   Image: ${{ env.IMAGE_NAME }}"
+          
+          # Build the Docker image
+          docker build --platform linux/amd64 -t ${{ env.IMAGE_NAME }} .
+
+      - name: Push Docker Image
+        run: |
+          echo "📤 Pushing image to Google Container Registry..."
+          docker push ${{ env.IMAGE_NAME }}
+          echo "✅ Backend image pushed successfully"
+
+      - name: Deploy to Cloud Run
+        run: |
+          echo "🚀 Deploying Backend Service: ${{ env.SERVICE_NAME }}"
+          
+          # Check if service exists
+          if gcloud run services describe ${{ env.SERVICE_NAME }} \
+              --platform managed \
+              --region ${{ env.REGION }} \
+              --project ${{ env.PROJECT_ID }} &> /dev/null; then
+            echo "Service exists, updating..."
+            gcloud run services update ${{ env.SERVICE_NAME }} \
+              --image ${{ env.IMAGE_NAME }} \
+              --platform managed \
+              --region ${{ env.REGION }} \
+              --ingress all \
+              --network=${{ env.VPC_NETWORK }} \
+              --subnet=${{ env.SUBNET_NAME }} \
+              --vpc-egress=private-ranges-only \
+              --project ${{ env.PROJECT_ID }}
+          else
+            echo "Service doesn't exist, creating..."
+            gcloud run deploy ${{ env.SERVICE_NAME }} \
+              --image ${{ env.IMAGE_NAME }} \
+              --platform managed \
+              --region ${{ env.REGION }} \
+              --allow-unauthenticated \
+              --ingress all \
+              --network=${{ env.VPC_NETWORK }} \
+              --subnet=${{ env.SUBNET_NAME }} \
+              --vpc-egress=private-ranges-only \
+              --project ${{ env.PROJECT_ID }}
+          fi
+          
+          echo "✅ Backend service deployed successfully"
+
+      - name: Get Service URL
+        run: |
+          echo "🌐 Backend Deployment Complete!"
+          
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format 'value(status.url)')
+          
+          echo "Backend API URL: $SERVICE_URL"
